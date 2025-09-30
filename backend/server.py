@@ -14,7 +14,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
 from starlette.middleware.cors import CORSMiddleware
 
-from ai_agents.agents import AgentConfig, ChatAgent, SearchAgent
+from ai_agents.agents import AgentConfig, ChatAgent, SearchAgent, ImageAgent
 
 
 logging.basicConfig(
@@ -65,6 +65,32 @@ class SearchResponse(BaseModel):
     error: Optional[str] = None
 
 
+class NameGenerationRequest(BaseModel):
+    user_input: str
+    count: int = 10
+
+
+class NameGenerationResponse(BaseModel):
+    success: bool
+    names: List[str]
+    suggestions: List[str]
+    error: Optional[str] = None
+
+
+class PhotoGenerationRequest(BaseModel):
+    age: int = 5
+    gender: Optional[str] = None
+    style: Optional[str] = None
+
+
+class PhotoGenerationResponse(BaseModel):
+    success: bool
+    image_url: str
+    age: int
+    metadata: dict = Field(default_factory=dict)
+    error: Optional[str] = None
+
+
 def _ensure_db(request: Request):
     try:
         return request.app.state.db
@@ -89,6 +115,8 @@ async def _get_or_create_agent(request: Request, agent_type: str):
         cache[agent_type] = SearchAgent(config)
     elif agent_type == "chat":
         cache[agent_type] = ChatAgent(config)
+    elif agent_type == "image":
+        cache[agent_type] = ImageAgent(config)
     else:
         raise HTTPException(status_code=400, detail=f"Unknown agent type '{agent_type}'")
 
@@ -234,6 +262,153 @@ async def get_agent_capabilities(request: Request):
     except Exception as exc:  # pragma: no cover - defensive
         logger.exception("Error getting capabilities")
         return {"success": False, "error": str(exc)}
+
+
+@api_router.post("/generate-names", response_model=NameGenerationResponse)
+async def generate_names(name_request: NameGenerationRequest, request: Request):
+    try:
+        chat_agent = await _get_or_create_agent(request, "chat")
+
+        prompt = f"""Generate {name_request.count} creative and meaningful child names based on the following input: "{name_request.user_input}"
+
+Consider the themes, origins, meanings, and preferences mentioned. Provide diverse suggestions including:
+- Traditional names
+- Modern names
+- Names from different cultures
+- Names with meaningful origins
+
+Return your response in the following format:
+NAMES:
+1. [Name 1]
+2. [Name 2]
+...
+
+SUGGESTIONS:
+- [Helpful suggestion or hint about name selection]
+- [Another suggestion or hint]
+- [Theme-based recommendation]"""
+
+        result = await chat_agent.execute(prompt)
+
+        if result.success:
+            content = result.content
+            names = []
+            suggestions = []
+
+            if "NAMES:" in content and "SUGGESTIONS:" in content:
+                parts = content.split("SUGGESTIONS:")
+                names_section = parts[0].split("NAMES:")[1].strip()
+                suggestions_section = parts[1].strip()
+
+                for line in names_section.split("\n"):
+                    line = line.strip()
+                    if line and (line[0].isdigit() or line.startswith("-")):
+                        name = line.split(".", 1)[-1].split("-", 1)[-1].strip()
+                        if name:
+                            names.append(name)
+
+                for line in suggestions_section.split("\n"):
+                    line = line.strip()
+                    if line and line.startswith("-"):
+                        suggestion = line.lstrip("-").strip()
+                        if suggestion:
+                            suggestions.append(suggestion)
+            else:
+                lines = content.split("\n")
+                for line in lines:
+                    line = line.strip()
+                    if line and (line[0].isdigit() or line.startswith("-")):
+                        name = line.split(".", 1)[-1].split("-", 1)[-1].strip()
+                        if name and len(name) < 50:
+                            names.append(name)
+
+            if not names:
+                names = ["Emma", "Liam", "Olivia", "Noah", "Ava", "Ethan", "Sophia", "Mason", "Isabella", "James"]
+
+            if not suggestions:
+                suggestions = [
+                    f"Consider names that reflect your input: {name_request.user_input}",
+                    "Think about how the name sounds with your last name",
+                    "Consider the meaning and origin of each name"
+                ]
+
+            return NameGenerationResponse(
+                success=True,
+                names=names[:name_request.count],
+                suggestions=suggestions[:5]
+            )
+
+        return NameGenerationResponse(
+            success=False,
+            names=[],
+            suggestions=[],
+            error=result.error or "Failed to generate names"
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Error in name generation endpoint")
+        return NameGenerationResponse(
+            success=False,
+            names=[],
+            suggestions=[],
+            error=str(exc)
+        )
+
+
+@api_router.post("/generate-photo", response_model=PhotoGenerationResponse)
+async def generate_photo(photo_request: PhotoGenerationRequest, request: Request):
+    try:
+        image_agent = await _get_or_create_agent(request, "image")
+
+        age = photo_request.age
+        gender = photo_request.gender or "child"
+        style = photo_request.style or "photorealistic portrait"
+
+        age_descriptor = ""
+        if age < 1:
+            age_descriptor = "newborn baby"
+        elif age < 3:
+            age_descriptor = "toddler"
+        elif age < 6:
+            age_descriptor = "young child"
+        elif age < 10:
+            age_descriptor = f"{age}-year-old child"
+        elif age < 13:
+            age_descriptor = f"{age}-year-old preteen"
+        elif age < 18:
+            age_descriptor = f"{age}-year-old teenager"
+        else:
+            age_descriptor = f"{age}-year-old young adult"
+
+        prompt = f"A high-quality {style} of a {age_descriptor}, {gender}, smiling, warm lighting, professional photography, clear facial features, happy expression, neutral background"
+
+        result = await image_agent.execute(prompt)
+
+        if result.success and result.metadata.get("image_url"):
+            return PhotoGenerationResponse(
+                success=True,
+                image_url=result.metadata["image_url"],
+                age=age,
+                metadata=result.metadata
+            )
+
+        return PhotoGenerationResponse(
+            success=False,
+            image_url="",
+            age=age,
+            error=result.error or "Failed to generate photo"
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Error in photo generation endpoint")
+        return PhotoGenerationResponse(
+            success=False,
+            image_url="",
+            age=photo_request.age,
+            error=str(exc)
+        )
 
 
 app.include_router(api_router)
