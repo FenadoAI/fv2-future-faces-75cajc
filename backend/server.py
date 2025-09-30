@@ -385,19 +385,24 @@ async def generate_photo(photo_request: PhotoGenerationRequest, request: Request
 
         result = await image_agent.execute(prompt)
 
-        if result.success and result.metadata.get("image_url"):
-            return PhotoGenerationResponse(
-                success=True,
-                image_url=result.metadata["image_url"],
-                age=age,
-                metadata=result.metadata
-            )
+        if result.success and result.content:
+            # Extract image URL from markdown format
+            import re
+            urls = re.findall(r'https?://[^\s\)]+', result.content)
+
+            if urls and 'storage.googleapis.com' in urls[0]:
+                return PhotoGenerationResponse(
+                    success=True,
+                    image_url=urls[0],
+                    age=age,
+                    metadata=result.metadata
+                )
 
         return PhotoGenerationResponse(
             success=False,
             image_url="",
             age=age,
-            error=result.error or "Failed to generate photo"
+            error=result.error or "Failed to generate photo: No image URL found"
         )
     except HTTPException:
         raise
